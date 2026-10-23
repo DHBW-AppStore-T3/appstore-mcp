@@ -392,7 +392,10 @@ class Toolbox:
                 return {"url": url, "status": r.status_code, "ok": 200 <= r.status_code < 400,
                         "ms": int((time.monotonic() - t0) * 1000), "body": r.text[:200] if "health" in url else ""}  # fmt: skip
             except httpx.HTTPError as ex:
-                return {"url": url, "ok": False, "error": type(ex).__name__ + ": " + str(ex)[:150]}
+                # A connect failure from inside the cluster is inconclusive: the public name resolves to
+                # the node itself and a pod cannot reach its own ingress through it (no hairpin on k3s).
+                return {"url": url, "ok": False, "unreachable": isinstance(ex, httpx.ConnectError | httpx.ConnectTimeout),
+                        "error": type(ex).__name__ + ": " + str(ex)[:150]}  # fmt: skip
 
         results = await asyncio.gather(*(probe(u) for u in targets.values()))
         return {"env": e.name, "endpoints": dict(zip(targets, results, strict=True))}
@@ -456,6 +459,7 @@ class Toolbox:
         data = dict(zip(names, parts, strict=True))
         bad: list[str] = []
         rolling: list[str] = []
+        warnings: list[str] = []
         for n, v in data.items():
             if isinstance(v, BaseException):
                 bad.append(f"{n}: could not be read ({type(v).__name__})")
@@ -486,7 +490,9 @@ class Toolbox:
                     bad.append(f"cnpg {c['name']}: {c['phase']}")
         if "endpoints" in data["health"]:
             for k, ep in data["health"]["endpoints"].items():
-                if not ep["ok"]:
+                if ep.get("unreachable"):
+                    warnings.append(f"{k} endpoint not probeable from inside the cluster ({ep.get('error')})")
+                elif not ep["ok"]:
                     bad.append(f"{k} endpoint {ep.get('status') or ep.get('error')}")
         if "runs" in data["bumpRuns"] and data["bumpRuns"]["runs"]:
             last = data["bumpRuns"]["runs"][0]
@@ -494,4 +500,4 @@ class Toolbox:
                 bad.append(f"last k8s-bump.yml run failed: {last['url']}")
         verdict = "unhealthy" if bad else "progressing" if rolling else "healthy"
         return {"env": e.name, "verdict": verdict, "problems": bad, "inProgress": rolling,
-                "details": data}  # fmt: skip
+                "warnings": warnings, "details": data}  # fmt: skip
