@@ -181,15 +181,19 @@ class AppStoreAuthProvider:
         )  # fmt: skip
         token = r.json().get("access_token")
         if not token:
+            log.warning("github token exchange failed: %s", r.json().get("error", "no access_token"))
             return None
         h = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
         user = await self.http.get("https://api.github.com/user", headers=h)
         if user.status_code != 200:
+            log.warning("github /user returned %s", user.status_code)
             return None
         member = await self.http.get(
             f"https://api.github.com/user/memberships/orgs/{self.s.github_org}", headers=h)
         if member.status_code == 200 and member.json().get("state") == "active":
             return user.json()["login"]
+        log.warning("github org membership check: status %s, state %s", member.status_code,
+                    member.json().get("state") if member.status_code == 200 else None)
         return None
 
     # ---- code -> tokens
