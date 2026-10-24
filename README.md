@@ -90,9 +90,14 @@ sets them; the secret ones come from the Secret `appstore-mcp`.
 
 ## Design notes
 
-- Tokens are stateless where possible: access tokens are Fernet-sealed (1 h); refresh tokens (30 d, rotated),
+- Tokens are stateless where possible: access tokens are Fernet-sealed (1 h); refresh tokens (7 d, rotated),
   authorization codes (5 min, single use), pending logins and registered clients live in a small SQLite
   file on the volume `/data`. Losing it only forces a fresh login.
-- The GitHub user token is used once for the org-membership check (`read:org`) and then dropped.
+- The GitHub user token (`read:org`) checks the org membership at the login and again at every refresh, so
+  leaving the org ends the access within the hour. It is stored Fernet-sealed with the refresh token, never
+  in plain text.
+- Clients may only send a login back to a loopback address (local MCP clients) or to one of
+  `ALLOWED_REDIRECT_URIS` (default: the hosted Claude clients' callbacks). There is no consent page, so a
+  client with any other https redirect could collect an org member's login.
 - The Kubernetes client is a small `httpx` wrapper (GET only) instead of the official `kubernetes`
   package: smaller image, trivially mockable, and incapable of writing.

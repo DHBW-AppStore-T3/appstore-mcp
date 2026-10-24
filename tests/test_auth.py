@@ -196,3 +196,94 @@ async def test_authorize_without_github_config_fails(settings, missing):
     p = AppStoreAuthProvider(replace(settings, **{missing: ""}), Store(":memory:"))
     with pytest.raises(AuthorizeError):
         await p.authorize(None, None)  # type: ignore[arg-type]
+
+
+def github_org(members: set[str]):
+    """GitHub whose org membership can change while the test runs (alice's token is gho_alice)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login/oauth/access_token":
+            return httpx.Response(200, json={"access_token": "gho_alice"})
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"login": "alice"})
+        if request.url.path.startswith("/user/memberships/orgs/DHBW-AppStore-T3"):
+            who = request.headers["Authorization"].removeprefix("Bearer gho_")
+            return httpx.Response(200, json={"state": "active"}) if who in members else httpx.Response(404)
+        return httpx.Response(500)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def tokens(c: TestClient):
+    q, info, verifier = login(c)
+    tok = c.post("/token", data={"grant_type": "authorization_code", "code": q["code"][0],
+                                 "redirect_uri": REDIRECT, "client_id": info["client_id"],
+                                 "code_verifier": verifier})  # fmt: skip
+    assert tok.status_code == 200, tok.text
+    return tok.json(), info
+
+
+def test_leaving_the_org_ends_the_access_at_the_next_refresh(settings, toolbox):
+    """Review S10: refresh tokens used to be rotated for 30 days without asking GitHub again."""
+    members = {"alice"}
+    with make_client(settings, toolbox, gh=github_org(members)) as c:
+        t, info = tokens(c)
+        ok = c.post("/token", data={"grant_type": "refresh_token", "refresh_token": t["refresh_token"],
+                                    "client_id": info["client_id"]})  # fmt: skip
+        assert ok.status_code == 200, ok.text
+
+        members.discard("alice")
+        gone = c.post("/token", data={"grant_type": "refresh_token", "refresh_token": ok.json()["refresh_token"],
+                                      "client_id": info["client_id"]})  # fmt: skip
+        assert gone.status_code == 400
+        assert gone.json()["error"] == "invalid_grant"
+
+
+def test_the_github_token_is_kept_encrypted(settings, toolbox):
+    store = Store(":memory:")
+    provider = AppStoreAuthProvider(settings, store, github_org({"alice"}))
+    with TestClient(build_app(settings, toolbox=toolbox, provider=provider), base_url="https://mcp.example.org") as c:
+        tokens(c)
+    rows = store._db.execute("SELECT v FROM refresh").fetchall()
+    assert rows and all("gho_alice" not in row[0] and json.loads(row[0])["gh"] for row in rows)
+
+
+async def test_a_refresh_token_without_a_github_token_needs_a_new_login(settings):
+    from mcp.server.auth.provider import RefreshToken, TokenError
+
+    p = AppStoreAuthProvider(settings, Store(":memory:"), github_org({"alice"}))
+    old = p._issue("c", ["mcp"], "github:alice", None).refresh_token  # issued before the check existed
+    rt = RefreshToken(token=old, client_id="c", scopes=["mcp"], expires_at=None, subject="github:alice")
+    with pytest.raises(TokenError):
+        await p.exchange_refresh_token(None, rt, ["mcp"])  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("uri", "allowed"),
+    [
+        ("http://localhost:33418/callback", True),
+        ("http://127.0.0.1:5000/cb", True),
+        ("https://claude.ai/api/mcp/auth_callback", True),
+        ("https://evil.example/cb", False),
+        ("https://claude.ai.evil.example/api/mcp/auth_callback", False),
+        ("http://evil.example/cb", False),
+    ],
+)
+def test_registration_allows_loopback_and_the_hosted_clients_only(settings, toolbox, uri, allowed):
+    with make_client(settings, toolbox) as c:
+        r = c.post("/register", json={"redirect_uris": [uri], "token_endpoint_auth_method": "none"})
+        assert (r.status_code == 201) is allowed, r.text
+
+
+async def test_a_client_registered_with_a_foreign_redirect_before_cannot_log_in(settings):
+    from mcp.server.auth.provider import AuthorizationParams, AuthorizeError
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    p = AppStoreAuthProvider(settings, Store(":memory:"), github())
+    evil = OAuthClientInformationFull(client_id="old", redirect_uris=["https://evil.example/cb"],
+                                      token_endpoint_auth_method="none")  # fmt: skip
+    p.store.put("clients", "old", evil.model_dump(mode="json"), 3600)
+    params = AuthorizationParams(state="s", scopes=["mcp"], code_challenge="x" * 43,
+                                 redirect_uri="https://evil.example/cb", redirect_uri_provided_explicitly=True)  # fmt: skip
+    with pytest.raises(AuthorizeError):
+        await p.authorize(evil, params)
