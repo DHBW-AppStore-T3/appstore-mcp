@@ -14,6 +14,12 @@ DEFAULT_REPOS = (
 DEFAULT_LOG_NAMESPACES = (
     "appstore-staging", "appstore-prod", "argocd", "cert-manager", "cnpg-system", "kube-system",
 )  # fmt: skip
+# Redirect URIs (besides loopback ones) a registered MCP client may send a login back to: the hosted
+# Claude clients. A client with any other https redirect could collect an org member's login (review S10).
+DEFAULT_REDIRECT_URIS = (
+    "https://claude.ai/api/mcp/auth_callback",
+    "https://claude.com/api/mcp/auth_callback",
+)
 DEP_PREFIX = "dep-"
 NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9.\-]{0,251}[a-z0-9])?$")
 
@@ -44,6 +50,7 @@ class Settings:
     data_dir: str = "/data"
     repos: tuple[str, ...] = DEFAULT_REPOS
     readable_namespaces: tuple[str, ...] = DEFAULT_LOG_NAMESPACES
+    allowed_redirect_uris: tuple[str, ...] = DEFAULT_REDIRECT_URIS
     argocd_namespace: str = "argocd"
     environments: Mapping[str, Env] = field(default_factory=dict)
 
@@ -82,6 +89,7 @@ class Settings:
             data_dir=e.get("DATA_DIR", "/data"),
             repos=csv("GITHUB_REPOS", DEFAULT_REPOS),
             readable_namespaces=csv("READABLE_NAMESPACES", DEFAULT_LOG_NAMESPACES),
+            allowed_redirect_uris=csv("ALLOWED_REDIRECT_URIS", DEFAULT_REDIRECT_URIS),
             argocd_namespace=e.get("ARGOCD_NAMESPACE", "argocd"),
             environments=envs,
         )
